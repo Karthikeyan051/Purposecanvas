@@ -1,0 +1,35 @@
+# PurposeCanvas Backend Requirements
+# Install in an active venv AFTER PyTorch cu128 is already installed
+
+# Core API
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+aiofiles==24.1.0
+pydantic==2.8.2
+pydantic-settings==2.4.0
+
+# AI / ML
+diffusers==0.30.3
+transformers==4.44.2
+accelerate==0.34.2
+safetensors==0.4.5
+sentence-transformers==3.1.1
+google-genai==0.8.0
+
+# Vector DB
+chromadb==0.5.15
+
+# Computer Vision
+opencv-python==4.10.0.84
+Pillow==10.4.0
+
+# GPU monitoring
+nvidia-ml-py==12.560.30
+
+# Database
+# sqlite3 is stdlib — no install needed
+
+# Document parsing (for upload feature)
+pypdf==4.3.1
+python-docx==1.1.2

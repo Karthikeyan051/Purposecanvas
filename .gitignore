@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+*.env
+
+# Model weights & generated images
+*.safetensors
+*.bin
+*.ckpt
+*.pt
+*.pth
+generated_images/
+model_cache/
+chroma_db/
+
+# Node
+node_modules/
+.next/
+out/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# SQLite
+*.db
+*.sqlite
+
+# Benchmark outputs (keep bench.py, not outputs)
+cow_turbo_*.png
+sdxl_*.png
