@@ -153,9 +153,8 @@ def get_stats() -> dict:
         """).fetchone()
         smart_gpu = (smart_rows["s"] or 0.0) if smart_rows else 0.0
 
-        smart_count = (con.execute(
-            "SELECT COUNT(*) as c FROM requests WHERE mode='smart'"
-        ).fetchone() or {}).get("c", 0)
+        count_row = con.execute("SELECT COUNT(*) as c FROM requests WHERE mode='smart'").fetchone()
+        smart_count = count_row["c"] if count_row else 0
         baseline_equivalent = smart_count * 22.0
         saved_gpu_s = max(0.0, baseline_equivalent - smart_gpu)
         saved_cost = saved_gpu_s * 0.0004

@@ -1,0 +1,5 @@
+content = open('generate_demo_pdf.py', encoding='utf-8').read()
+content = content.replace('\u2014', '--').replace('\u2013', '-')
+content = content.replace('\u2019', "'").replace('\u2018', "'")
+open('generate_demo_pdf.py', 'w', encoding='utf-8').write(content)
+print('Fixed unicode')

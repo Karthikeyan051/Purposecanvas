@@ -7,12 +7,28 @@ from pathlib import Path
 
 
 class Settings(BaseSettings):
-    # Gemini
+    # Gemini (fallback)
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-2.0-flash"
+    GEMINI_MODEL: str = "gemini-3.8-flash"
+
+    # Groq (PRIMARY LLM — Llama-3.3-70B, very fast & free)
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "qwen/qwen3.8-27b"  # Available on free Groq tier
+
+    # Supabase (vector cache)
+    SUPABASE_URL: str = ""
+    SUPABASE_KEY: str = ""
+
+    # Ollama (local LLM + embeddings — no internet required)
+    OLLAMA_MODEL: str = "qwen2.5:0.5b"           # for intent/classify fallback
+    OLLAMA_EMBED_MODEL: str = "nomic-embed-text"  # for vector embeddings
+
+    # LLM provider order: groq → gemini → ollama
+    LLM_PROVIDER: str = "groq"  # "groq" | "gemini" | "ollama"
 
     # Cache
     CACHE_THRESHOLD: float = 0.88
+    ENABLE_VECTOR_EMBED: int = 0  # set to 1 when nomic-embed-text is ready
 
     # Cost (honest: labelled "assumed cloud rate" in UI)
     COST_PER_GPU_SECOND: float = 0.0004

@@ -1,110 +1,169 @@
 """
-PurposeCanvas — Semantic Cache (RAG layer)
-ChromaDB persistent store + all-MiniLM-L6-v2 embeddings.
-Hit if cosine similarity >= CACHE_THRESHOLD (default 0.88).
+PurposeCanvas — RAG Vector Cache
+Uses Ollama nomic-embed-text for embeddings + Supabase pgvector for storage.
+Falls back to in-memory exact match if Supabase unavailable.
 """
+import hashlib
 import logging
-from dataclasses import dataclass
-from pathlib import Path
+import os
+import time
 from typing import Optional
 
-from .config import settings
+log = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)
-
-# ── Cache result ──────────────────────────────────────────────────────────────
-
-@dataclass
-class CacheHit:
-    image_path: str
-    image_url: str
-    similarity: float
-    original_key: str
+# ─── In-memory fallback cache ──────────────────────────────────────────────
+_MEM_CACHE: dict[str, dict] = {}
 
 
-# ── Lazy-init globals ─────────────────────────────────────────────────────────
-
-_collection = None
-_embedder = None
-
-
-def _get_collection():
-    global _collection, _embedder
-    if _collection is None:
-        import chromadb
-        from sentence_transformers import SentenceTransformer
-
-        client = chromadb.PersistentClient(path=settings.CHROMA_PATH)
-        _collection = client.get_or_create_collection(
-            name="image_cache",
-            metadata={"hnsw:space": "cosine"},
-        )
-        _embedder = SentenceTransformer("all-MiniLM-L6-v2")
-        logger.info(f"ChromaDB loaded. Collection has {_collection.count()} items.")
-    return _collection, _embedder
-
-
-# ── Public API ────────────────────────────────────────────────────────────────
-
-def lookup(key: str) -> Optional[CacheHit]:
-    """Search cache by intent key. Returns CacheHit if similarity >= threshold."""
-    collection, embedder = _get_collection()
-
-    if collection.count() == 0:
+# ─── Embedding ──────────────────────────────────────────────────────────────
+def _get_embedding(text: str) -> list[float] | None:
+    """Get text embedding from Ollama nomic-embed-text (local, no internet)."""
+    from .config import settings
+    if not settings.ENABLE_VECTOR_EMBED:
+        return None
+    try:
+        import ollama
+        resp = ollama.embed(model=settings.OLLAMA_EMBED_MODEL, input=text)
+        # resp.embeddings is list of list[float]
+        return resp.embeddings[0] if resp.embeddings else None
+    except Exception as e:
+        log.warning(f"[EMBED] Failed to generate embedding: {e}")
         return None
 
-    embedding = embedder.encode(key).tolist()
 
-    results = collection.query(
-        query_embeddings=[embedding],
-        n_results=1,
-        include=["metadatas", "distances"],
-    )
-
-    if not results["ids"][0]:
+# ─── Supabase client ─────────────────────────────────────────────────────────
+def _get_supabase():
+    from .config import settings
+    if not settings.SUPABASE_URL or not settings.SUPABASE_KEY:
+        return None
+    try:
+        from supabase import create_client
+        return create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+    except Exception as e:
+        log.warning(f"[SUPABASE] Client init failed: {e}")
         return None
 
-    # ChromaDB cosine distance: 0=identical, 2=opposite
-    # Convert to similarity: 1 - (distance / 2)
-    distance = results["distances"][0][0]
-    similarity = 1.0 - (distance / 2.0)
 
-    if similarity >= settings.CACHE_THRESHOLD:
-        meta = results["metadatas"][0][0]
-        logger.info(f"Cache HIT: key='{key}' similarity={similarity:.3f}")
-        return CacheHit(
-            image_path=meta["image_path"],
-            image_url=meta["image_url"],
-            similarity=similarity,
-            original_key=results["ids"][0][0],
-        )
+# ─── Cache Key ────────────────────────────────────────────────────────────────
+def make_key(intent_key: str) -> str:
+    return hashlib.md5(intent_key.lower().strip().encode()).hexdigest()[:16]
 
-    logger.info(f"Cache MISS: key='{key}' best_similarity={similarity:.3f} < {settings.CACHE_THRESHOLD}")
+
+# ─── Lookup ──────────────────────────────────────────────────────────────────
+def lookup(intent_key: str) -> Optional[dict]:
+    """
+    1. Try Supabase vector similarity search (semantic RAG)
+    2. Try Supabase exact key match
+    3. Try in-memory exact match
+    """
+    from .config import settings
+    key = make_key(intent_key)
+
+    # 1. Try semantic vector search in Supabase
+    if settings.ENABLE_VECTOR_EMBED:
+        embedding = _get_embedding(intent_key)
+        if embedding:
+            result = _supabase_vector_search(embedding, settings.CACHE_THRESHOLD)
+            if result:
+                log.info(f"[CACHE] Vector HIT for '{intent_key}' (similarity={result.get('similarity', 0):.3f})")
+                return result
+
+    # 2. Try exact key lookup in Supabase
+    sb = _get_supabase()
+    if sb:
+        try:
+            resp = sb.table("vector_cache").select("*").eq("key", key).limit(1).execute()
+            if resp.data:
+                log.info(f"[CACHE] Exact HIT in Supabase for '{intent_key}'")
+                return resp.data[0]
+        except Exception as e:
+            log.warning(f"[CACHE] Supabase lookup failed: {e}")
+
+    # 3. In-memory fallback
+    if key in _MEM_CACHE:
+        log.info(f"[CACHE] Memory HIT for '{intent_key}'")
+        return _MEM_CACHE[key]
+
+    log.info(f"[CACHE] MISS for '{intent_key}'")
     return None
 
 
-def store(key: str, image_path: str, image_url: str, metadata: dict = None):
-    """Store a generated image in the cache."""
-    collection, embedder = _get_collection()
-    embedding = embedder.encode(key).tolist()
+def _supabase_vector_search(embedding: list[float], threshold: float) -> Optional[dict]:
+    """Call the match_vectors RPC function in Supabase."""
+    sb = _get_supabase()
+    if not sb:
+        return None
+    try:
+        resp = sb.rpc("match_vectors", {
+            "query_embedding": embedding,
+            "match_threshold": threshold,
+        }).execute()
+        if resp.data:
+            return resp.data[0]
+    except Exception as e:
+        log.warning(f"[CACHE] Vector search failed: {e}")
+    return None
 
-    meta = {
+
+# ─── Store ───────────────────────────────────────────────────────────────────
+def store(intent_key: str, image_path: str, image_url: str, intent_type: str = "") -> None:
+    """
+    Store in:
+    1. Supabase (with embedding if vector mode enabled)
+    2. In-memory fallback
+    """
+    from .config import settings
+    key = make_key(intent_key)
+
+    # In-memory always
+    _MEM_CACHE[key] = {
+        "key": key,
         "image_path": image_path,
         "image_url": image_url,
-        "key": key,
+        "intent_type": intent_type,
     }
-    if metadata:
-        meta.update(metadata)
 
-    collection.upsert(
-        ids=[key],
-        embeddings=[embedding],
-        metadatas=[meta],
-    )
-    logger.info(f"Cache STORED: key='{key}'")
+    # Supabase store
+    sb = _get_supabase()
+    if sb:
+        try:
+            record: dict = {
+                "key": key,
+                "image_path": image_path,
+                "image_url": image_url,
+                "intent_type": intent_type,
+            }
+            if settings.ENABLE_VECTOR_EMBED:
+                embedding = _get_embedding(intent_key)
+                if embedding:
+                    record["embedding"] = embedding
+                    log.info(f"[CACHE] Stored with vector embedding ({len(embedding)} dims)")
+
+            sb.table("vector_cache").upsert(record).execute()
+            log.info(f"[CACHE] Stored in Supabase: key={key}")
+        except Exception as e:
+            log.warning(f"[CACHE] Supabase store failed: {e}")
+
+def count() -> int:
+    """Return total number of rows in Supabase cache."""
+    sb = _get_supabase()
+    if sb:
+        try:
+            resp = sb.table("vector_cache").select("id", count="exact").execute()
+            return resp.count if resp.count else 0
+        except Exception:
+            pass
+    return len(_MEM_CACHE)
 
 
 def count() -> int:
-    """Return number of items in cache."""
-    collection, _ = _get_collection()
-    return collection.count()
+    """Return total number of rows in Supabase cache."""
+    sb = _get_supabase()
+    if sb:
+        try:
+            resp = sb.table("vector_cache").select("id", count="exact").execute()
+            return resp.count if resp.count else 0
+        except Exception:
+            pass
+    return len(_MEM_CACHE)
+
